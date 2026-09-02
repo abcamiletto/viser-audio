@@ -139,4 +139,8 @@ jobs:
           tag_name: v${{ env.VERSION }}
           name: v${{ env.VERSION }}
           generate_release_notes: true
-          files: dist/*
+          # Not dist/*: uv build also writes dist/.gitignore, which would be
+          # uploaded as a release asset.
+          files: |
+            dist/*.whl
+            dist/*.tar.gz

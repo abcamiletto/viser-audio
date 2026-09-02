@@ -42,6 +42,7 @@ import { Paper } from "@mantine/core";
 import GeneratedGuiContainer from "./ControlPanel/Generated";
 import { Line, LineSegments } from "./Line";
 import { Arrows } from "./Arrows";
+import { SceneAudio } from "./SceneAudio";
 import { shadowArgs } from "./ShadowArgs";
 import { CascadedDirectionalLight } from "./CascadedDirectionalLight";
 import { BasicMesh } from "./mesh/BasicMesh";
@@ -561,6 +562,16 @@ function createObjectFactory(
           <ViserImage ref={ref} {...message}>
             {children}
           </ViserImage>
+        ),
+      };
+    }
+    // Add an audio source.
+    case "AudioMessage": {
+      return {
+        makeObject: (ref, children) => (
+          <SceneAudio ref={ref} {...message}>
+            {children}
+          </SceneAudio>
         ),
       };
     }

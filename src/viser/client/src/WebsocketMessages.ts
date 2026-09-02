@@ -476,6 +476,24 @@ export interface ImageMessage {
     scale: number | [number, number, number];
   };
 }
+/** Message for adding an audio source to the scene.
+ *
+ * (automatically generated)
+ */
+export interface AudioMessage {
+  type: "AudioMessage";
+  name: string;
+  owner: string;
+  virtual: boolean;
+  props: {
+    _samples: Float32Array;
+    _num_channels: number;
+    sample_rate: number;
+    volume: number;
+    loop: boolean;
+    positional: boolean;
+  };
+}
 /** Message from server->client carrying line segments information.
  *
  * (automatically generated)
@@ -1568,6 +1586,27 @@ export interface BackgroundImageMessage {
   rgb_data: Uint8Array<ArrayBuffer> | null;
   depth_data: Uint8Array<ArrayBuffer> | null;
 }
+/** Append samples to the end of an audio node's clip, for streaming.
+ *
+ * (automatically generated)
+ */
+export interface AudioAppendMessage {
+  type: "AudioAppendMessage";
+  name: string;
+  _samples: Float32Array;
+  owner: string;
+}
+/** Start, resume, or pause playback of an audio node.
+ *
+ * (automatically generated)
+ */
+export interface AudioPlaybackMessage {
+  type: "AudioPlaybackMessage";
+  name: string;
+  playing: boolean;
+  offset: number | null;
+  owner: string;
+}
 /** Set the visibility of a particular node in the scene.
  *
  * (automatically generated)
@@ -2185,6 +2224,7 @@ export type Message =
   | BatchedGlbMessage
   | TransformControlsMessage
   | ImageMessage
+  | AudioMessage
   | LineSegmentsMessage
   | ArrowMessage
   | CatmullRomSplineMessage
@@ -2241,6 +2281,8 @@ export type Message =
   | TransformControlsDragStartMessage
   | TransformControlsDragEndMessage
   | BackgroundImageMessage
+  | AudioAppendMessage
+  | AudioPlaybackMessage
   | SetSceneNodeVisibilityMessage
   | SetSceneNodeDragBindingsMessage
   | SetSceneNodeClickBindingsMessage
@@ -2305,6 +2347,7 @@ export type SceneNodeMessage =
   | BatchedGlbMessage
   | TransformControlsMessage
   | ImageMessage
+  | AudioMessage
   | LineSegmentsMessage
   | ArrowMessage
   | CatmullRomSplineMessage
@@ -2358,6 +2401,7 @@ const typeSetSceneNodeMessage = new Set([
   "BatchedGlbMessage",
   "TransformControlsMessage",
   "ImageMessage",
+  "AudioMessage",
   "LineSegmentsMessage",
   "ArrowMessage",
   "CatmullRomSplineMessage",
@@ -3232,6 +3276,33 @@ export const SceneNodePropsSchema: {
     scale: {
       kind: "default",
       tsType: "(number | [number, number, number])",
+    },
+  },
+  AudioMessage: {
+    _samples: {
+      kind: "default",
+      tsType: "Float32Array",
+      editorHidden: true,
+    },
+    _num_channels: {
+      kind: "default",
+      tsType: "number",
+    },
+    sample_rate: {
+      kind: "default",
+      tsType: "number",
+    },
+    volume: {
+      kind: "default",
+      tsType: "number",
+    },
+    loop: {
+      kind: "boolean",
+      tsType: "boolean",
+    },
+    positional: {
+      kind: "boolean",
+      tsType: "boolean",
     },
   },
   LineSegmentsMessage: {

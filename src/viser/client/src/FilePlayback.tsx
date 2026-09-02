@@ -17,6 +17,7 @@ import { ViewerContext } from "./ViewerContext";
 import { defaultEnvironmentState } from "./EnvironmentState";
 import { isFormElement } from "./utils/isFormElement";
 import { PlaybackScenePanel } from "./PlaybackScenePanel";
+import { setAudioPlayerPaused } from "./SceneAudio";
 import { VISER_VERSION } from "./VersionInfo";
 import { notifications } from "@mantine/notifications";
 
@@ -217,6 +218,11 @@ function PlaybackInterface({
 
   // Pause/play with spacebar.
   useSpacebarTogglePause(setPaused);
+
+  // Keep scene audio in sync with the playback bar.
+  useEffect(() => {
+    setAudioPlayerPaused(paused);
+  }, [paused]);
 
   const updateCurrentTime = useCallback(
     (value: number) => {

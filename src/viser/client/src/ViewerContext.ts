@@ -26,6 +26,11 @@ export type NodePoseDataMap = {
 };
 
 // Type definitions for all mutable state.
+export type AudioCommand =
+  | { type: "play"; offset: number | null }
+  | { type: "pause" }
+  | { type: "append"; samples: Float32Array };
+
 export type ViewerMutable = {
   // Function references.
   sendMessage: (message: Message) => void;
@@ -107,6 +112,13 @@ export type ViewerMutable = {
       }[];
     };
   };
+
+  // Commands for audio nodes, keyed per variant via variantKey(owner, name),
+  // drained in order by SceneAudio on its next frame. Scene node creates are
+  // applied in a batched set() at the end of a frame's message processing,
+  // so a command arriving in the same batch as its node's create message is
+  // handled before the React component exists.
+  audioCommands: { [ownerAndName: string]: AudioCommand[] };
 
   // Per-node pose data. Stored outside the reactive store to avoid
   // triggering React re-renders on every pose update.

@@ -5,6 +5,7 @@ from collections import defaultdict
 from typing import Any, Dict, Type, Union, cast
 
 import numpy as np
+import numpy.typing as npt
 from typing_extensions import (
     Annotated,
     Literal,
@@ -120,15 +121,18 @@ def _get_ts_type(typ: Type[Any]) -> str:
         raw_typ = cast(Any, getattr(typ, "__origin__", typ))
 
         # For NDArray[dtype], resolve to the specific TypeScript typed array.
-        if raw_typ is np.ndarray:
+        if raw_typ is np.ndarray or raw_typ is npt.NDArray:
             # Extract the dtype from NDArray[dtype] annotation.
             args = get_args(typ)
             if args:
-                # NDArray[np.float32] has args like (Any, np.dtype[np.float32]).
+                # NDArray[np.float32] has args like (Any, np.dtype[np.float32]);
+                # on numpy>=2.5 the alias keeps `NDArray` as its origin and the
+                # scalar type as its only arg.
                 dtype_arg = args[-1]
                 dtype_args = get_args(dtype_arg)
-                if dtype_args and dtype_args[0] in _numpy_dtype_to_ts_typed_array:
-                    return _numpy_dtype_to_ts_typed_array[dtype_args[0]]
+                scalar_typ = dtype_args[0] if dtype_args else dtype_arg
+                if scalar_typ in _numpy_dtype_to_ts_typed_array:
+                    return _numpy_dtype_to_ts_typed_array[scalar_typ]
 
         assert raw_typ in _raw_type_mapping, f"Unsupported type {raw_typ}"
         return _raw_type_mapping[raw_typ]

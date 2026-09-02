@@ -17,7 +17,7 @@ only-include = ["src/viser"]
 packages = ["src/viser"]
 
 [project]
-name = "viser"
+name = "viser-audio"
 dynamic = ["version"]
 description = "3D visualization + Python"
 readme = "README.md"
@@ -57,7 +57,7 @@ urdf = [
     "yourdfpy>=0.0.53,<1.0.0",
 ]
 dev = [
-    "viser[examples]",
+    "viser-audio[examples]",
     "pyright>=1.1.308",
     "ruff>=0.9.3",
     "pre-commit==3.3.2",
@@ -71,7 +71,7 @@ dev = [
     "pytest-split>=0.8.0",
 ]
 examples = [
-    "viser[urdf]",
+    "viser-audio[urdf]",
     "torch>=1.13.1",
     "torch<2.5.0; python_version<'3.9'",  # Last torch with cp38 wheels.
     "matplotlib>=3.7.1",
@@ -86,7 +86,7 @@ examples = [
 ]
 
 [project.urls]
-"GitHub" = "https://github.com/viser-project/viser"
+"GitHub" = "https://github.com/abcamiletto/viser-audio"
 
 [project.scripts]
 viser-build-client = "viser._client_autobuild:build_client_entrypoint"

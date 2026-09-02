@@ -1436,6 +1436,81 @@ class ImageProps:
 
 
 @dataclasses.dataclass
+class AudioMessage(_CreateSceneNodeMessage):
+    """Message for adding an audio source to the scene."""
+
+    props: AudioProps
+
+
+@dataclasses.dataclass
+class AudioProps:
+    _samples: Annotated[npt.NDArray[np.float32], infra.EditorHidden()]
+    """Audio samples in [-1, 1], flattened and interleaved by frame. Length is
+    the number of frames times ``_num_channels``."""
+    _num_channels: int
+    """Number of interleaved channels in ``_samples``."""
+    sample_rate: int
+    """Sample rate of the audio, in Hz."""
+    volume: float
+    """Playback volume, where 1.0 is the amplitude of the original samples."""
+    loop: bool
+    """Whether playback should restart from the beginning when it finishes."""
+    positional: bool
+    """Whether to spatialize the audio at the node's world pose. If False, the
+    audio is played back globally."""
+
+    def __post_init__(self):
+        # Check shapes.
+        assert len(self._samples.shape) == 1
+        assert self._num_channels >= 1
+        assert len(self._samples) % self._num_channels == 0
+
+        # Check dtypes.
+        assert self._samples.dtype == np.float32
+
+
+@dataclasses.dataclass
+class AudioAppendMessage(
+    Message,
+    entity=EntityLifecycle("scene", "update_simple", "name"),
+    include_in_scene_serialization=True,
+):
+    """Append samples to the end of an audio node's clip, for streaming."""
+
+    name: str
+    _samples: npt.NDArray[np.float32]
+    """Samples to append, flattened and interleaved by frame. The channel count
+    must match the node's current samples."""
+    owner: str = dataclasses.field(default="", init=False)
+
+    @override
+    def redundancy_key(self) -> str:
+        # Appends are cumulative: never coalesce them, so a late-joining
+        # client replays every chunk in order. Cached per instance like the
+        # base key, so the buffer can find the slot again when it drops us.
+        if "_cached_redundancy_key" not in self.__dict__:
+            object.__setattr__(self, "_cached_redundancy_key", str(uuid.uuid4()))
+        return self.__dict__["_cached_redundancy_key"]
+
+
+@dataclasses.dataclass
+class AudioPlaybackMessage(
+    Message,
+    entity=EntityLifecycle("scene", "update_simple", "name"),
+    include_in_scene_serialization=True,
+):
+    """Start, resume, or pause playback of an audio node."""
+
+    name: str
+    playing: bool
+    """Whether the node should be playing."""
+    offset: Optional[float]
+    """Position within the clip to seek to, in seconds. If None, playback
+    resumes from where it was paused (or from the start if it never began)."""
+    owner: str = dataclasses.field(default="", init=False)
+
+
+@dataclasses.dataclass
 class SetSceneNodeVisibilityMessage(
     Message,
     entity=EntityLifecycle("scene", "update_simple", "name"),

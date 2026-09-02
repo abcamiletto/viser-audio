@@ -6,7 +6,7 @@ import { TextureLoader } from "three";
 import { toMantineColor } from "./components/colorUtils";
 
 import { createParkedSceneUpdates } from "./batchedSceneUpdates";
-import { ViewerContext, variantKey } from "./ViewerContext";
+import { AudioCommand, ViewerContext, variantKey } from "./ViewerContext";
 import {
   FileTransferPart,
   FileTransferStartDownload,
@@ -149,6 +149,14 @@ function useMessageHandler() {
     }
   }
 
+  function queueAudioCommand(
+    owner: string,
+    name: string,
+    command: AudioCommand,
+  ) {
+    (viewerMutable.audioCommands[variantKey(owner, name)] ??= []).push(command);
+  }
+
   const fileDownloadHandler = useFileDownloadHandler();
 
   // Return type for the message handler. Messages either:
@@ -246,6 +254,14 @@ function useMessageHandler() {
             ],
           });
         }
+      }
+
+      // A same-name re-add is an in-place upsert (no unmount), so commands
+      // parked for the previous clip must not leak into the new one.
+      if (message.type === "AudioMessage") {
+        delete viewerMutable.audioCommands[
+          variantKey(message.owner, message.name)
+        ];
       }
 
       // Add scene node.
@@ -821,6 +837,25 @@ function useMessageHandler() {
         }
         return;
       }
+      // Audio commands are parked for the node's component to drain; see
+      // ViewerMutable.audioCommands.
+      case "AudioAppendMessage": {
+        queueAudioCommand(message.owner, message.name, {
+          type: "append",
+          samples: message._samples,
+        });
+        return;
+      }
+      case "AudioPlaybackMessage": {
+        queueAudioCommand(
+          message.owner,
+          message.name,
+          message.playing
+            ? { type: "play", offset: message.offset }
+            : { type: "pause" },
+        );
+        return;
+      }
       // Remove one scope's variant of a scene node, plus its same-scope
       // descendants (needed for recordings from older servers, which sent a
       // single remove per subtree; current servers enumerate descendants,
@@ -834,6 +869,7 @@ function useMessageHandler() {
           owner,
         )) {
           delete viewerMutable.skinnedMeshState[variantKey(owner, name)];
+          delete viewerMutable.audioCommands[variantKey(owner, name)];
         }
         return;
       }

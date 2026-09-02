@@ -38,6 +38,7 @@ from ._notification_handle import NotificationHandle as NotificationHandle
 from ._scene_api import SceneApi as SceneApi
 from ._scene_handles import AmbientLightHandle as AmbientLightHandle
 from ._scene_handles import ArrowsHandle as ArrowsHandle
+from ._scene_handles import AudioHandle as AudioHandle
 from ._scene_handles import BatchedAxesHandle as BatchedAxesHandle
 from ._scene_handles import BatchedGlbHandle as BatchedGlbHandle
 from ._scene_handles import BatchedMeshHandle as BatchedMeshHandle
@@ -83,4 +84,4 @@ from ._viser import ViserServer as ViserServer
 if not _TYPE_CHECKING:
     from ._scene_handles import ScenePointerEvent as ScenePointerEvent
 
-__version__ = "1.1.0"
+__version__ = "0.0.1"

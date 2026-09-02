@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 from typing import Generator
 
+import numpy as np
+
 from viser import _messages as vm
 from viser.infra._async_message_buffer import AsyncMessageBuffer
 
@@ -165,4 +167,51 @@ def test_remove_phase_push_purges_updates_but_not_bindings() -> None:
         assert "SetPositionMessage" not in kinds
         assert "SetSceneNodeClickBindingsMessage" in kinds
         assert "RemoveSceneNodeMessage" in kinds
+        assert_entity_index_consistent(buffer)
+
+
+def test_audio_appends_replay_in_order_and_purge_on_remove() -> None:
+    """A late-joining client must receive every streamed chunk, in order,
+    after the clip -- and none of them once the node is removed."""
+
+    def append(name: str, value: float) -> vm.AudioAppendMessage:
+        return vm.AudioAppendMessage(name, np.full(2, value, dtype=np.float32))
+
+    def buffered_audio_types(buffer: AsyncMessageBuffer) -> list[str]:
+        return [
+            type(message).__name__
+            for _id, message in sorted(buffer.message_from_id.items())
+            if getattr(message, "name", None) == "/audio"
+        ]
+
+    with _sync_buffer() as buffer:
+        buffer.push(
+            vm.AudioMessage(
+                name="/audio",
+                props=vm.AudioProps(
+                    _samples=np.zeros(4, dtype=np.float32),
+                    _num_channels=1,
+                    sample_rate=8000,
+                    volume=1.0,
+                    loop=False,
+                    positional=False,
+                ),
+            )
+        )
+        buffer.push(append("/audio", 0.0))
+        buffer.push(append("/audio", 1.0))
+        buffer.push(
+            vm.SceneNodeUpdateMessage(
+                "/audio", {"_samples": np.ones(4, dtype=np.float32), "_num_channels": 1}
+            )
+        )
+        assert buffered_audio_types(buffer) == [
+            "AudioMessage",
+            "AudioAppendMessage",
+            "AudioAppendMessage",
+            "SceneNodeUpdateMessage",
+        ]
+
+        buffer.push(vm.RemoveSceneNodeMessage("/audio"))
+        assert buffered_audio_types(buffer) == ["RemoveSceneNodeMessage"]
         assert_entity_index_consistent(buffer)

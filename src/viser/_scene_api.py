@@ -25,6 +25,7 @@ from typing import (
 )
 
 import numpy as np
+import numpy.typing as npt
 from typing_extensions import Literal, Never, ParamSpec, TypeAlias, deprecated
 
 from viser._backwards_compat_shims import deprecated_positional_shim
@@ -36,6 +37,7 @@ from ._image_encoding import cv2_imencode_with_fallback
 from ._scene_handles import (
     AmbientLightHandle,
     ArrowsHandle,
+    AudioHandle,
     BatchedAxesHandle,
     BatchedGlbHandle,
     BatchedMeshHandle,
@@ -209,6 +211,50 @@ def _encode_image_binary(
         resolved_format, image, jpeg_quality, channel_ordering="rgb"
     )
     return resolved_format, encoded
+
+
+def _normalize_audio_samples(
+    samples: np.ndarray,
+) -> tuple[npt.NDArray[np.float32], int]:
+    """Normalize audio samples for transport: a flat, frame-major interleaved
+    float32 array in [-1, 1] plus the channel count.
+
+    Accepts (N,) mono or (N, C) multi-channel arrays. Integer PCM is scaled by
+    its dtype's range (unsigned formats are re-centered on their midpoint);
+    floats are cast to float32 as-is, without clipping."""
+    array = np.asarray(samples)
+    if array.ndim == 1:
+        num_channels = 1
+    elif array.ndim == 2:
+        num_channels = array.shape[1]
+    else:
+        raise ValueError(
+            f"Expected audio samples of shape (N,) or (N, C), but got {array.shape}."
+        )
+    # Web Audio caps a buffer at 32 channels. Catching this here also catches
+    # the common (C, N) layout returned by librosa/torchaudio, which would
+    # otherwise be read as N frames of C channels and only fail in the browser.
+    if not 1 <= num_channels <= 32:
+        raise ValueError(
+            "Expected samples with shape (N,) or (N, C) with at most 32 "
+            f"channels, but got shape {array.shape}. If your array is (C, N), "
+            "transpose it."
+        )
+
+    if np.issubdtype(array.dtype, np.integer):
+        info = np.iinfo(array.dtype)
+        if info.min < 0:
+            scaled = array.astype(np.float32) / float(max(abs(info.min), info.max))
+        else:
+            midpoint = (float(info.max) + 1.0) / 2.0
+            scaled = (array.astype(np.float32) - midpoint) / midpoint
+    elif np.issubdtype(array.dtype, np.floating):
+        scaled = array.astype(np.float32)
+    else:
+        raise ValueError(
+            f"Expected float or integer audio samples, but got dtype {array.dtype}."
+        )
+    return np.ascontiguousarray(scaled).reshape(-1), num_channels
 
 
 TVector = TypeVar("TVector", bound=tuple)
@@ -3068,6 +3114,56 @@ class SceneApi:
         handle._jpeg_quality = jpeg_quality
         handle._user_format = format
         return handle
+
+    def add_audio(
+        self,
+        name: str,
+        samples: np.ndarray,
+        sample_rate: int,
+        *,
+        volume: float = 1.0,
+        loop: bool = False,
+        positional: bool = False,
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
+        visible: bool = True,
+    ) -> AudioHandle:
+        """Add an audio source to the scene.
+
+        Playback starts with :meth:`AudioHandle.play`. Audio from a hidden node
+        (or a node with a hidden ancestor) is muted.
+
+        Args:
+            name: A scene tree name. Names in the format of /parent/child can be used to
+                define a kinematic tree.
+            samples: A numpy array of samples, with shape (N,) for mono audio or
+                (N, C) for C interleaved channels. Floats are interpreted as
+                amplitudes in [-1, 1]; integer PCM is normalized by its dtype range.
+            sample_rate: Sample rate of the samples, in Hz.
+            volume: Playback volume, where 1.0 is the amplitude of the original samples.
+            loop: Whether playback should restart from the beginning when it finishes.
+            positional: Whether to spatialize the audio at this node's world pose.
+                If False, the audio is played back globally.
+            wxyz: Quaternion rotation to parent frame from local frame (R_pl).
+            position: Translation from parent frame to local frame (t_pl).
+            visible: Whether or not this audio source is initially visible.
+
+        Returns:
+            Handle for manipulating scene node.
+        """
+        flat_samples, num_channels = _normalize_audio_samples(samples)
+        message = _messages.AudioMessage(
+            name=name,
+            props=_messages.AudioProps(
+                _samples=flat_samples,
+                _num_channels=num_channels,
+                sample_rate=sample_rate,
+                volume=volume,
+                loop=loop,
+                positional=positional,
+            ),
+        )
+        return AudioHandle._make(self, message, name, wxyz, position, visible)
 
     @deprecated_positional_shim
     def add_transform_controls(

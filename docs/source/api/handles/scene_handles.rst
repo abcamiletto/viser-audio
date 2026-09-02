@@ -23,6 +23,8 @@ methods like :func:`viser.ViserServer.add_frame()` or
 
 .. autoclass:: viser.ArrowsHandle
 
+.. autoclass:: viser.AudioHandle
+
 .. autoclass:: viser.BatchedAxesHandle
 
 .. autoclass:: viser.BatchedGlbHandle

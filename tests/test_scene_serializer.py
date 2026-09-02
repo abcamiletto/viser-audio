@@ -117,6 +117,28 @@ def test_serialize_round_trip() -> None:
     assert faces.tobytes() in stored
 
 
+def test_serialize_round_trip_with_audio() -> None:
+    """A recording carries the clip, its streamed appends, and its playback
+    state."""
+    samples = np.linspace(-1.0, 1.0, 16, dtype=np.float32)
+    chunk = np.full(4, 0.5, dtype=np.float32)
+    with _server() as server:
+        audio = server.scene.add_audio("/audio", samples, 8000)
+        audio.append(chunk)
+        audio.play(offset=0.5)
+        data = server.get_scene_serializer().serialize()
+
+    meta, buffers = _decode_viser_bytes(data)
+    audio_types = [
+        message["type"]
+        for _time, message in meta["messages"]
+        if message["type"].startswith("Audio")
+    ]
+    assert audio_types == ["AudioMessage", "AudioAppendMessage", "AudioPlaybackMessage"]
+    assert samples.tobytes() in buffers
+    assert chunk.tobytes() in buffers
+
+
 def test_serialize_dedupes_identical_buffers() -> None:
     """Byte-identical arrays serialized in different messages must be stored
     once, with all placeholders remapped onto the shared buffer."""

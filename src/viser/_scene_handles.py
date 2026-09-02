@@ -1714,6 +1714,105 @@ class ImageHandle(
         self._data = data
 
 
+class AudioHandle(
+    SceneNodeHandle,
+    _messages.AudioProps,
+):
+    """Handle for audio sources."""
+
+    def _assert_not_removed(self, method: str) -> None:
+        """Reject playback calls on a removed handle, matching the guard that
+        ``AssignablePropsBase`` applies to property assignment: the messages
+        would otherwise be queued against a no-longer-registered node."""
+        if self._impl.removed:
+            raise RuntimeError(
+                f"Cannot call {method!r} on a removed {type(self).__name__}."
+            )
+
+    @property
+    def samples(self) -> np.ndarray:
+        """Current samples, with shape (N,) for mono audio or (N, C) for C
+        channels. Synchronized automatically when assigned; a playing node
+        restarts from the beginning of the new clip."""
+        samples = self._impl.props._samples
+        num_channels = self._impl.props._num_channels
+        return samples if num_channels == 1 else samples.reshape(-1, num_channels)
+
+    @samples.setter
+    def samples(self, samples: np.ndarray) -> None:
+        from ._scene_api import _normalize_audio_samples
+
+        flat_samples, num_channels = _normalize_audio_samples(samples)
+        self._impl.props._samples = flat_samples
+        self._impl.props._num_channels = num_channels
+        # Both fields go out in ONE update: the client rebuilds its audio
+        # buffer from the pair, and a split update would briefly de-interleave
+        # the new samples using the old channel count.
+        self._impl.api._queue_scene_message(
+            _messages.SceneNodeUpdateMessage(
+                self._impl.name,
+                {"_samples": flat_samples.copy(), "_num_channels": num_channels},
+            )
+        )
+
+    @property
+    def duration(self) -> float:
+        """Length of the current clip in seconds, including appended samples."""
+        props = self._impl.props
+        return len(props._samples) / (props._num_channels * props.sample_rate)
+
+    def play(self, offset: float | None = None) -> None:
+        """Start playback, or resume it if the audio is paused.
+
+        Args:
+            offset: If given, seek to this position (in seconds) before playing.
+                If None, resume from the paused position, or from the start if
+                playback never began or already finished.
+
+        Note that the latest playback state is replayed to late-joining
+        clients, so audio left playing will also start for new clients.
+        """
+        self._assert_not_removed("play")
+        self._impl.api._queue_scene_message(
+            _messages.AudioPlaybackMessage(self._impl.name, True, offset)
+        )
+
+    def pause(self) -> None:
+        """Pause playback, keeping the current position."""
+        self._assert_not_removed("pause")
+        self._impl.api._queue_scene_message(
+            _messages.AudioPlaybackMessage(self._impl.name, False, None)
+        )
+
+    def append(self, samples: np.ndarray) -> None:
+        """Append samples to the end of the current clip, for streaming.
+
+        Unlike assigning to :attr:`samples`, this does not interrupt playback.
+
+        Args:
+            samples: Samples to append, with the same number of channels as the
+                current samples.
+        """
+        from ._scene_api import _normalize_audio_samples
+
+        self._assert_not_removed("append")
+        flat_samples, num_channels = _normalize_audio_samples(samples)
+        if num_channels != self._impl.props._num_channels:
+            raise ValueError(
+                f"Expected {self._impl.props._num_channels} channel(s) to match "
+                f"the current samples, but got {num_channels}."
+            )
+        # Mirror the append locally (without queueing a props update, which
+        # would resend the whole clip) so `handle.samples` reads back
+        # everything the client has.
+        self._impl.props._samples = np.concatenate(
+            [self._impl.props._samples, flat_samples]
+        )
+        self._impl.api._queue_scene_message(
+            _messages.AudioAppendMessage(self._impl.name, flat_samples.copy())
+        )
+
+
 class LabelHandle(
     SceneNodeHandle,
     _messages.LabelProps,

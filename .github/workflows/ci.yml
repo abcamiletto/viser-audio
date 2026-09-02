@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uvx ruff check docs/ src/ examples/ tests/ --output-format github
+      - run: uvx ruff format docs/ src/ examples/ tests/ --check
+      - run: uv run --extra dev pyright ./src ./examples
+      - run: uv run --extra dev pytest --ignore=tests/e2e -q
+
+  client:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/viser/client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: src/viser/client/package-lock.json
+      - run: npm ci
+      - name: Check that the message protocol is in sync with _messages.py
+        # WebsocketMessages.ts is generated from src/viser/_messages.py.
+        working-directory: .
+        run: |
+          uv run --extra dev --python 3.12 python sync_client_server.py --sync-messages
+          git diff --exit-code -- src/viser/client/src/WebsocketMessages.ts
+      - run: npx tsc --noEmit
+      - run: npx eslint src/
+      - run: npx prettier --check src/
+      - run: npx vitest run src
+
+  e2e-audio:
+    # Only the audio end-to-end tests run in CI; the full upstream e2e suite
+    # is kept in the repo but is slow and unrelated to this fork's changes.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-client
+      - uses: ./.github/actions/setup-e2e
+        with:
+          python-version: "3.12"
+      - run: uv run pytest tests/e2e/test_audio.py -q
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-test-results
+          path: test-results/
+          retention-days: 30

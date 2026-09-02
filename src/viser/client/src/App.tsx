@@ -214,6 +214,9 @@ function ViewerRoot() {
     // Skinned mesh state.
     skinnedMeshState: {},
 
+    // Pending commands for audio nodes.
+    audioCommands: {},
+
     // Per-node pose data (non-reactive, read in useFrame).
     nodePoseData: {},
   });

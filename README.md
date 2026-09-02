@@ -1,72 +1,87 @@
-<h1 align="left">
-    <img alt="viser logo" src="https://viser.studio/main/_static/logo.svg" width="30" height="auto" />
-    Viser
-    <img alt="viser logo" src="https://viser.studio/main/_static/logo.svg" width="30" height="auto" />
-</h1>
+# viser-audio
 
-<p align="left">
-    <img alt="pyright" src="https://github.com/viser-project/viser/actions/workflows/pyright.yml/badge.svg" />
-    <img alt="typescript-compile" src="https://github.com/viser-project/viser/actions/workflows/typescript-compile.yml/badge.svg" />
-    <a href="https://pypi.org/project/viser/">
-        <img alt="codecov" src="https://img.shields.io/pypi/pyversions/viser" />
-    </a>
-    <a href="https://discord.gg/pnNTkHNUwP">
-        <img alt="Viser Discord"  src="https://img.shields.io/discord/1423204924518432809?logo=discord&label=discord" />
-    </a>
-</p>
+Audio for [viser](https://github.com/nerfstudio-project/viser) scenes: play
+clips from Python, spatialize them from a scene node, and stream samples to the
+browser while they play.
 
-Viser is a 3D visualization library for computer vision and robotics in Python.
+viser-audio installs *alongside* viser -- it is not a fork. It injects a small
+Web Audio runtime into viser's stock client, so nothing else about your setup
+changes.
 
-Features include:
-
-- API for visualizing 3D primitives.
-- GUI building blocks: buttons, checkboxes, text inputs, sliders, etc.
-- Scene interaction tools (clicks, selection, transform gizmos).
-- Programmatic camera control and rendering.
-- An entirely web-based client, for easy use over SSH!
-
-The goal is to provide primitives that are (1) easy for simple visualization tasks, but (2) can be composed into more elaborate interfaces. For more about design goals, see the [technical report](https://arxiv.org/abs/2507.22885).
-
-Examples and documentation: https://viser.studio
-
-## Installation
-
-You can install `viser` with `pip`:
+## Install
 
 ```bash
-pip install viser            # Core dependencies only.
-pip install viser[examples]  # To include example dependencies.
+pip install viser-audio
 ```
 
-That's it! To learn more, we recommend looking at the examples in the [documentation](https://viser.studio/).
+## Usage
 
-## Citation
+```python
+import numpy as np
+import viser
+import viser_audio
 
-To cite Viser in your work, you can use the BibTeX for our [technical report](https://arxiv.org/abs/2507.22885):
+server = viser.ViserServer()
+audio = viser_audio.AudioApi(server)
 
+sample_rate = 44100
+t = np.arange(sample_rate) / sample_rate
+clip = audio.add(
+    "/speaker",
+    0.3 * np.sin(2 * np.pi * 220 * t),
+    sample_rate,
+    loop=True,
+    positional=True,
+)
+clip.play()
+
+clip.position = (1.0, 0.0, 0.0)  # The sound follows the scene node.
+clip.volume = 0.5
+server.sleep_forever()
 ```
-@article{yi2025viser,
-  title={Viser: Imperative, web-based 3d visualization in python},
-  author={Yi, Brent and Kim, Chung Min and Kerr, Justin and Wu, Gina and Feng, Rebecca and Zhang, Anthony and Kulhanek, Jonas and Choi, Hongsuk and Ma, Yi and Tancik, Matthew and Kanazawa, Angjoo},
-  journal={arXiv preprint arXiv:2507.22885},
-  year={2025}
-}
+
+## API
+
+- `AudioApi(server)` -- installs the browser runtime; idempotent per server.
+- `AudioApi.add(name, samples, sample_rate=44100, *, volume, loop, positional,
+  wxyz, position) -> AudioHandle` -- adds a clip on the scene node `name`.
+  Samples are `(N,)` mono or `(N, C)`; floats in [-1, 1], integers normalized.
+- `AudioHandle.play(offset=None)` / `.pause()` -- `offset` seeks; `None` resumes
+  (a finished clip restarts from the beginning).
+- `AudioHandle.append(chunk)` -- extends the clip without interrupting
+  playback, for streaming.
+- `AudioHandle.samples` / `.duration` / `.volume` / `.loop` / `.positional` /
+  `.position` / `.wxyz` -- read and write; assigning `samples` replaces the
+  clip, toggling `positional` preserves the playhead.
+- `AudioHandle.remove()` -- removes the clip and its scene node.
+
+Audio state is replayed to clients that join later, so a clip left playing also
+starts for new browser tabs.
+
+## Autoplay
+
+Browsers refuse to start audio before the page sees a user gesture. If a clip is
+asked to play first, the client shows an "Audio is waiting" notification and
+playback starts on the first click or keypress.
+
+## Development
+
+```bash
+uv sync --group dev
+uv run ruff check . && uv run ruff format --check . && uv run pyright
+uv run pytest tests --ignore=tests/e2e
+
+# End-to-end tests drive a real browser.
+uv run playwright install chromium
+uv run pytest tests/e2e
 ```
 
-## Acknowledgements
+The browser runtime is TypeScript in `src/viser_audio/client`, bundled by
+esbuild into the checked-in `src/viser_audio/runtime.js`:
 
-`viser` is heavily inspired by packages like
-[Pangolin](https://github.com/stevenlovegrove/Pangolin),
-[Dear ImGui](https://github.com/ocornut/imgui),
-[rviz](https://wiki.ros.org/rviz/),
-[meshcat](https://github.com/rdeits/meshcat), and
-[Gradio](https://github.com/gradio-app/gradio).
-
-The web client is implemented using [React](https://react.dev/), with:
-
-- [Vite](https://vitejs.dev/) / [Rollup](https://rollupjs.org/) for bundling
-- [three.js](https://threejs.org/) via [react-three-fiber](https://github.com/pmndrs/react-three-fiber) and [drei](https://github.com/pmndrs/drei)
-- [Mantine](https://mantine.dev/) for UI components
-- [vanilla-extract](https://vanilla-extract.style/) for stylesheets
-
-Thanks to the authors of these projects for open-sourcing their work!
+```bash
+cd src/viser_audio/client
+npm ci
+npm run typecheck
+npm run build   # rewrites ../runtime.js; commit it
+```

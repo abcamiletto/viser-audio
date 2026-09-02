@@ -1,12 +1,10 @@
-# Release on version bump: every push to main compares the package version
-# with the one before the push. When it went up, this workflow tags the
-# commit, builds the wheel (with the bundled client), publishes it to PyPI via
-# trusted publishing (the `pypi` environment; no API tokens involved), and
-# creates a GitHub release with auto-generated notes.
+# Release on version bump: every push to main compares `project.version` in
+# pyproject.toml with the one before the push. When it went up, this workflow
+# tags the commit, builds the package, publishes it to PyPI via trusted
+# publishing (the `pypi` environment; no API tokens involved), and creates a
+# GitHub release with auto-generated notes.
 #
-# To cut a release: bump `__version__` in src/viser/__init__.py, run
-# `python sync_client_server.py --sync-version` so the client embeds the same version, and
-# push (or merge) to main.
+# To cut a release: bump the version in pyproject.toml and push to main.
 
 name: Release
 
@@ -36,21 +34,18 @@ jobs:
         run: |
           set -euo pipefail
           read_version() {
-            # Prints the __version__ string from the given src/viser/__init__.py text.
-            sed -nE 's/^__version__ = "([^"]+)"$/\1/p' | head -n 1
+            uv run --no-project --python 3.12 python -c "import sys, tomllib; print(tomllib.load(sys.stdin.buffer)['project']['version'])"
           }
-          new_version=$(read_version < src/viser/__init__.py)
-          [ -n "$new_version" ] || { echo "Could not read __version__ from src/viser/__init__.py" >&2; exit 1; }
+          new_version=$(read_version < pyproject.toml)
           echo "version=$new_version" >> "$GITHUB_OUTPUT"
 
-          if ! old_init=$(git show "$BEFORE_SHA:src/viser/__init__.py" 2>/dev/null); then
-            # First push to the branch: nothing to compare against, so
-            # release whatever version is checked in.
+          # No readable previous version (first push, or a pyproject.toml
+          # without a static version): release whatever is checked in.
+          if ! old_version=$(git show "$BEFORE_SHA:pyproject.toml" 2>/dev/null | read_version 2>/dev/null); then
             echo "No version before this push (before=$BEFORE_SHA); releasing $new_version"
             echo "bumped=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          old_version=$(printf '%s\n' "$old_init" | read_version)
 
           bumped=$(uv run --no-project --with packaging python -c \
             'import sys; from packaging.version import Version; print(str(Version(sys.argv[2]) > Version(sys.argv[1])).lower())' \
@@ -73,17 +68,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
-      - name: Check that the client embeds the same version
-        # The client warns on a server/client version mismatch, so the
-        # generated VersionInfo.ts must be in sync with __version__.
-        run: |
-          set -euo pipefail
-          client_version=$(sed -nE 's/^export const VISER_VERSION = "([^"]+)";$/\1/p' src/viser/client/src/VersionInfo.ts)
-          if [ "$client_version" != "$VERSION" ]; then
-            echo "Client version '$client_version' != package version '$VERSION'." >&2
-            echo "Run 'python sync_client_server.py --sync-version' and commit VersionInfo.ts." >&2
-            exit 1
-          fi
       - name: Push tag
         run: |
           git fetch --tags
@@ -95,41 +79,21 @@ jobs:
           git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
           git tag "v$VERSION"
           git push origin "v$VERSION"
-      # Restores the shared client build from cache, or builds it on a miss.
-      - uses: ./.github/actions/build-client
-      - name: Only bundle the client build
-        # Keep src/viser/client to tracked sources + build/ so .nodeenv,
-        # node_modules, etc. never end up in the distribution.
-        run: |
-          mv src/viser/client/build ./__built_client
-          rm -rf src/viser/client/*
-          git checkout src/viser/client
-          mv ./__built_client src/viser/client/build
       - name: Build
         run: uv build
       - name: Verify wheel contents
-        # The client build and the HDRI presets are runtime dependencies of
-        # the installed package but sit outside the usual Python packaging
-        # path; fail the release if either is missing from the wheel.
+        # The browser runtime is served at run time from the installed
+        # package; fail the release if it is missing from the wheel.
         run: |
           python3 - <<'PY'
           import glob
-          import pathlib
           import zipfile
 
           (wheel,) = glob.glob("dist/*.whl")
-          names = set(zipfile.ZipFile(wheel).namelist())
-          missing = [
-              path
-              for path in ["viser/client/build/index.html"]
-              + sorted(
-                  f"viser/_assets/hdri/{f.name}"
-                  for f in pathlib.Path("src/viser/_assets/hdri").iterdir()
-              )
-              if path not in names
-          ]
-          assert not missing, f"Missing from {wheel}: {missing}"
-          print(f"{wheel} OK: client build + {len(names)} files")
+          names = zipfile.ZipFile(wheel).namelist()
+          assert "viser_audio/runtime.js" in names, f"runtime.js missing from {wheel}"
+          assert not any("node_modules" in n for n in names), "node_modules leaked into the wheel"
+          print(f"{wheel} OK: {len(names)} files")
           PY
       - name: Publish to PyPI
         run: uv publish

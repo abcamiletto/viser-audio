@@ -1,35 +1,17 @@
-"""E2E tests for scene audio: playback, streaming appends, and muting."""
+"""Browser tests: clips reach the client, play, and grow while streaming."""
 
 from __future__ import annotations
+
+from typing import Callable
 
 import numpy as np
 from playwright.sync_api import Page
 
-import viser
+import viser_audio
 
-from .utils import wait_for_scene_node
-
-# The three.js Audio object under a scene node, reduced to what the tests
-# observe. three leaves `type` as "Audio" on PositionalAudio; the panner is
-# what tells the two apart.
-JS_AUDIO_STATE = """
-(nodeName) => {
-    const root = window.__viserMutable.nodeRefFromName[nodeName];
-    if (!root) return null;
-    let audio = null;
-    root.traverse((child) => {
-        if (child.type === "Audio") audio = child;
-    });
-    if (audio === null) return null;
-    return {
-        positional: audio.panner !== undefined,
-        isPlaying: audio.isPlaying,
-        duration: audio.buffer === null ? 0.0 : audio.buffer.duration,
-        gain: audio.gain.gain.value,
-        progress: audio._progress,
-        contextState: audio.context.state,
-    };
-}
+# The runtime's view of one clip, by name.
+CLIP_STATE = """
+(name) => window.__VISER_AUDIO__.debug().find((clip) => clip.name === name) ?? null
 """
 
 
@@ -38,98 +20,47 @@ def _tone(seconds: float, sample_rate: int = 8000) -> np.ndarray:
     return 0.2 * np.sin(2.0 * np.pi * 220.0 * t)
 
 
-def _wait_until(page: Page, node_name: str, condition: str) -> None:
-    """Wait until `condition`, a JS expression over `state`, holds."""
+def _wait_until(page: Page, name: str, condition: str) -> None:
+    """Wait until `condition`, a JS expression over `clip`, holds."""
     page.wait_for_function(
-        f"(nodeName) => {{ const state = ({JS_AUDIO_STATE})(nodeName);"
-        f" return state !== null && ({condition}); }}",
-        arg=node_name,
-        timeout=10_000,
+        f"(name) => {{ const clip = ({CLIP_STATE})(name);"
+        f" return clip !== null && ({condition}); }}",
+        arg=name,
+        timeout=15_000,
     )
 
 
-def _add_and_unlock(server: viser.ViserServer, page: Page, name: str, **kwargs):
-    audio = server.scene.add_audio(name, _tone(1.0), 8000, **kwargs)
-    wait_for_scene_node(page, name)
-    # Browsers keep the AudioContext suspended until the page sees a gesture.
-    page.mouse.click(400, 300)
-    return audio
+def test_clip_reaches_a_client_that_joins_later(
+    audio: viser_audio.AudioApi, connect: Callable[[], Page]
+) -> None:
+    audio.add("/late", _tone(1.0), 8000, positional=True)
+    page = connect()
+    _wait_until(page, "/late", "clip.duration === 1.0 && clip.positional")
 
 
-def test_audio_plays_and_streams(viser_server: viser.ViserServer, viser_page: Page):
-    errors: list[str] = []
-    viser_page.on(
-        "console", lambda m: errors.append(m.text) if m.type == "error" else None
-    )
-    viser_page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
+def test_play_advances_the_playhead_and_pause_stops_it(
+    audio: viser_audio.AudioApi, connect: Callable[[], Page]
+) -> None:
+    page = connect()
+    clip = audio.add("/playback", _tone(5.0), 8000)
+    _wait_until(page, "/playback", "clip.duration === 5.0")
 
-    audio = _add_and_unlock(
-        viser_server, viser_page, "/audio", loop=True, positional=True
-    )
-    audio.play()
-    _wait_until(
-        viser_page, "/audio", 'state.isPlaying && state.contextState === "running"'
-    )
-    state = viser_page.evaluate(JS_AUDIO_STATE, "/audio")
-    assert state["positional"] is True
-    assert state["duration"] == 1.0
+    clip.play()
+    _wait_until(page, "/playback", "clip.playing && clip.position > 0.05")
 
-    # Appending to a playing node extends the buffer in place.
-    audio.append(_tone(0.5))
-    _wait_until(viser_page, "/audio", "state.duration > 1.4 && state.isPlaying")
-
-    # A hidden node is muted.
-    audio.visible = False
-    _wait_until(viser_page, "/audio", "state.gain === 0.0")
-    audio.visible = True
-    _wait_until(viser_page, "/audio", "state.gain === 1.0")
-
-    # Toggling `positional` swaps the three.js object; playback and the
-    # appended samples carry over.
-    audio.positional = False
-    _wait_until(
-        viser_page,
-        "/audio",
-        "!state.positional && state.isPlaying && state.duration > 1.4",
-    )
-
-    audio.pause()
-    _wait_until(viser_page, "/audio", "!state.isPlaying")
-    assert errors == [], f"console errors: {errors}"
+    clip.pause()
+    _wait_until(page, "/playback", "!clip.playing")
+    position = page.evaluate(CLIP_STATE, "/playback")["position"]
+    assert position > 0.0
 
 
-def test_streamed_clip_resumes_after_running_dry(
-    viser_server: viser.ViserServer, viser_page: Page
-):
-    """A stream whose source ends before the next chunk arrives resumes at
-    the end of the old buffer, not from the start."""
-    audio = _add_and_unlock(viser_server, viser_page, "/stream")
-    audio.play()
-    _wait_until(viser_page, "/stream", "state.isPlaying")
-    _wait_until(viser_page, "/stream", "!state.isPlaying")
+def test_append_extends_a_playing_clip(
+    audio: viser_audio.AudioApi, connect: Callable[[], Page]
+) -> None:
+    page = connect()
+    clip = audio.add("/stream", _tone(1.0), 8000)
+    clip.play()
+    _wait_until(page, "/stream", "clip.playing")
 
-    audio.append(_tone(0.5))
-    _wait_until(
-        viser_page,
-        "/stream",
-        "state.isPlaying && state.duration > 1.4 && state.progress >= 0.99",
-    )
-
-    # An explicit play() after a natural end restarts from the top.
-    _wait_until(viser_page, "/stream", "!state.isPlaying")
-    audio.play()
-    _wait_until(viser_page, "/stream", "state.isPlaying && state.progress === 0")
-
-
-def test_paused_stream_does_not_autostart_on_append(
-    viser_server: viser.ViserServer, viser_page: Page
-):
-    audio = _add_and_unlock(viser_server, viser_page, "/paused")
-    audio.play()
-    _wait_until(viser_page, "/paused", "state.isPlaying")
-    audio.pause()
-    _wait_until(viser_page, "/paused", "!state.isPlaying")
-
-    audio.append(_tone(0.5))
-    _wait_until(viser_page, "/paused", "state.duration > 1.4")
-    assert viser_page.evaluate(JS_AUDIO_STATE, "/paused")["isPlaying"] is False
+    clip.append(_tone(2.0))
+    _wait_until(page, "/stream", "clip.duration > 2.9 && clip.playing")

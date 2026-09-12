@@ -1,67 +1,35 @@
-// Web Audio playback shared by live viser scenes and external timeline players.
-import type { AudioAddMessage, AudioMessage, Samples } from "./protocol";
-
-export type MatrixElements = ArrayLike<number>;
-type Vec3 = [number, number, number];
-
-export interface AudioHost {
-  nodeMatrix(name: string): MatrixElements | null;
-  cameraMatrix(): MatrixElements | null;
-}
-
-/** Position is in timeline seconds. Rate must be finite and positive. */
-export type TransportState = { position: number; playing: boolean; rate: number };
-export type AudioTransport = () => TransportState;
-
-type Clip = {
-  name: string;
-  sampleRate: number;
-  numChannels: number;
-  volume: number;
-  loop: boolean;
-  positional: boolean;
-  playbackRate: number;
-  startTime: number | null;
-  buffer: AudioBuffer | null;
-  source: AudioBufferSourceNode | null;
-  gain: GainNode;
-  panner: PannerNode | null;
-  playRequested: boolean;
-  progress: number;
-  startedAt: number;
-  sourceRate: number;
-};
-
-export type ClipDebugState = {
-  name: string;
-  numChannels: number;
-  sampleRate: number;
-  numFrames: number;
-  duration: number;
-  playing: boolean;
-  position: number;
-  volume: number;
-  loop: boolean;
-  positional: boolean;
-  playbackRate: number;
-  startTime: number | null;
-  contextState: string;
-};
-
-const DRIFT_SECONDS = 0.08;
-
-export class AudioEngine {
-  private ctx: AudioContext | null = null;
-  private readonly clips = new Map<string, Clip>();
-  private transport: AudioTransport | null = null;
-  private frame: number | null = null;
-  private unlockButton: HTMLButtonElement | null = null;
-  private resumePending = false;
-  private disposed = false;
-
-  constructor(private readonly host?: AudioHost) {}
-
-  handle(message: AudioMessage): void {
+// audio.ts
+var DRIFT_SECONDS = 0.08;
+var AudioEngine = class {
+  constructor(host) {
+    this.host = host;
+    this.ctx = null;
+    this.clips = /* @__PURE__ */ new Map();
+    this.transport = null;
+    this.frame = null;
+    this.unlockButton = null;
+    this.resumePending = false;
+    this.disposed = false;
+    this.unlock = () => {
+      const ctx = this.ctx;
+      if (!ctx || ctx.state === "running" || this.resumePending) return;
+      this.resumePending = true;
+      void ctx.resume().then(() => {
+        if (this.disposed) return;
+        this.hideUnlock();
+        this.syncTimeline();
+      }).catch((error) => {
+        if (!this.disposed) console.error("[viser-audio] Audio context could not resume", error);
+      }).finally(() => {
+        this.resumePending = false;
+      });
+    };
+    this.tick = () => {
+      this.frame = null;
+      this.sync(false);
+    };
+  }
+  handle(message) {
     this.checkAlive();
     if (message.type === "AudioAddMessage") {
       this.add(message);
@@ -86,21 +54,21 @@ export class AudioEngine {
         }
         case "AudioUpdateMessage": {
           const u = message.updates;
-          if (u.volume !== undefined) {
+          if (u.volume !== void 0) {
             clip.volume = u.volume;
             clip.gain.gain.value = u.volume;
           }
-          if (u.loop !== undefined) {
+          if (u.loop !== void 0) {
             clip.progress = this.playhead(clip);
             clip.startedAt = this.context().currentTime;
             clip.loop = u.loop;
             if (clip.source) clip.source.loop = u.loop;
           }
-          if (u.positional !== undefined) {
+          if (u.positional !== void 0) {
             clip.positional = u.positional;
             this.connectOutput(clip);
           }
-          if (u.playback_rate !== undefined) {
+          if (u.playback_rate !== void 0) {
             positiveRate(u.playback_rate);
             clip.progress = this.playhead(clip);
             this.stop(clip);
@@ -123,9 +91,8 @@ export class AudioEngine {
     this.syncTimeline();
     this.scheduleFrame();
   }
-
   /** Bind a client-local clock. Call sync() after seeks for immediate response. */
-  setTransport(transport: AudioTransport | null): void {
+  setTransport(transport) {
     this.checkAlive();
     this.transport = transport;
     for (const clip of this.clips.values()) {
@@ -133,29 +100,25 @@ export class AudioEngine {
     }
     this.sync();
   }
-
   /** Restore the tracks folded at a recording checkpoint, then apply its events. */
-  loadCheckpoint(tracks: readonly AudioAddMessage[]): void {
+  loadCheckpoint(tracks) {
     this.reset();
     for (const track of tracks) this.add(track);
     this.sync();
   }
-
-  sync(force = true): void {
+  sync(force = true) {
     this.checkAlive();
     this.syncTimeline(force);
     this.updateSpatialization();
     this.scheduleFrame();
   }
-
-  reset(): void {
+  reset() {
     this.checkAlive();
     for (const name of this.clips.keys()) this.remove(name);
     if (this.frame !== null) cancelAnimationFrame(this.frame);
     this.frame = null;
   }
-
-  debug(): ClipDebugState[] {
+  debug() {
     return [...this.clips.values()].map((clip) => ({
       name: clip.name,
       numChannels: clip.numChannels,
@@ -169,11 +132,10 @@ export class AudioEngine {
       positional: clip.positional,
       playbackRate: clip.playbackRate,
       startTime: clip.startTime,
-      contextState: this.ctx?.state ?? "none",
+      contextState: this.ctx?.state ?? "none"
     }));
   }
-
-  dispose(): void {
+  dispose() {
     if (this.disposed) return;
     this.reset();
     this.disposed = true;
@@ -183,12 +145,11 @@ export class AudioEngine {
     void this.ctx?.close();
     this.ctx = null;
   }
-
-  private add(message: AudioAddMessage): void {
+  add(message) {
     positiveRate(message.playback_rate);
     const buffer = this.buildBuffer(message.samples, message.num_channels, message.sample_rate);
     this.remove(message.name);
-    const clip: Clip = {
+    const clip = {
       name: message.name,
       sampleRate: message.sample_rate,
       numChannels: message.num_channels,
@@ -204,14 +165,13 @@ export class AudioEngine {
       playRequested: false,
       progress: 0,
       startedAt: 0,
-      sourceRate: message.playback_rate,
+      sourceRate: message.playback_rate
     };
     clip.gain.gain.value = clip.volume;
     this.clips.set(clip.name, clip);
     this.connectOutput(clip);
   }
-
-  private context(): AudioContext {
+  context() {
     if (!this.ctx) {
       this.ctx = new AudioContext();
       document.addEventListener("pointerdown", this.unlock);
@@ -219,46 +179,23 @@ export class AudioEngine {
     }
     return this.ctx;
   }
-
-  private unlock = (): void => {
-    const ctx = this.ctx;
-    if (!ctx || ctx.state === "running" || this.resumePending) return;
-    this.resumePending = true;
-    void ctx
-      .resume()
-      .then(() => {
-        if (this.disposed) return;
-        this.hideUnlock();
-        this.syncTimeline();
-      })
-      .catch((error: unknown) => {
-        if (!this.disposed) console.error("[viser-audio] Audio context could not resume", error);
-      })
-      .finally(() => {
-        this.resumePending = false;
-      });
-  };
-
-  private requestUnlock(): void {
+  requestUnlock() {
     if (!this.unlockButton) {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = "Enable audio";
-      button.style.cssText =
-        "position:fixed;right:16px;bottom:16px;z-index:10000;padding:8px 16px;cursor:pointer";
+      button.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:10000;padding:8px 16px;cursor:pointer";
       button.addEventListener("click", this.unlock);
       document.body.append(button);
       this.unlockButton = button;
     }
     this.unlock();
   }
-
-  private hideUnlock(): void {
+  hideUnlock() {
     this.unlockButton?.remove();
     this.unlockButton = null;
   }
-
-  private buildBuffer(samples: Samples, channels: number, rate: number): AudioBuffer | null {
+  buildBuffer(samples, channels, rate) {
     const flat = sampleFloats(samples);
     if (!Number.isInteger(channels) || channels < 1 || channels > 32 || flat.length % channels) {
       throw new Error("Invalid interleaved audio channel count or sample length.");
@@ -272,22 +209,20 @@ export class AudioEngine {
     }
     return buffer;
   }
-
-  private connectOutput(clip: Clip): void {
+  connectOutput(clip) {
     const ctx = this.context();
     clip.gain.disconnect();
     clip.panner?.disconnect();
     if (clip.positional) {
       if (!this.host) throw new Error("Positional audio requires an AudioHost.");
-      clip.panner ??= new PannerNode(ctx, { panningModel: "HRTF", distanceModel: "inverse" });
+      clip.panner ?? (clip.panner = new PannerNode(ctx, { panningModel: "HRTF", distanceModel: "inverse" }));
       clip.gain.connect(clip.panner);
       clip.panner.connect(ctx.destination);
     } else {
       clip.gain.connect(ctx.destination);
     }
   }
-
-  private playhead(clip: Clip): number {
+  playhead(clip) {
     if (!clip.source) return clip.progress;
     let position = clip.progress;
     position += (this.context().currentTime - clip.startedAt) * clip.sourceRate;
@@ -295,10 +230,9 @@ export class AudioEngine {
     if (clip.loop && duration && position >= 0) return position % duration;
     return Math.min(position, duration);
   }
-
-  private start(clip: Clip, position: number, rate: number): void {
+  start(clip, position, rate) {
     const buffer = clip.buffer;
-    if (!buffer || (!clip.loop && position >= buffer.duration)) return;
+    if (!buffer || !clip.loop && position >= buffer.duration) return;
     const ctx = this.context();
     if (ctx.state !== "running") this.requestUnlock();
     const offset = clip.loop && position >= 0 ? position % buffer.duration : Math.max(0, position);
@@ -320,22 +254,19 @@ export class AudioEngine {
     clip.startedAt = when;
     clip.sourceRate = rate;
   }
-
-  private stop(clip: Clip): void {
+  stop(clip) {
     if (!clip.source) return;
     clip.source.onended = null;
     clip.source.stop();
     clip.source.disconnect();
     clip.source = null;
   }
-
-  private startLive(clip: Clip): void {
+  startLive(clip) {
     if (clip.startTime === null && clip.playRequested) {
       this.start(clip, clip.progress, clip.playbackRate);
     }
   }
-
-  private append(clip: Clip, samples: Samples): void {
+  append(clip, samples) {
     const chunk = this.buildBuffer(samples, clip.numChannels, clip.sampleRate);
     if (!chunk) return;
     const old = clip.buffer;
@@ -343,22 +274,19 @@ export class AudioEngine {
     const buffer = this.context().createBuffer(
       clip.numChannels,
       oldLength + chunk.length,
-      clip.sampleRate,
+      clip.sampleRate
     );
     for (let channel = 0; channel < clip.numChannels; channel++) {
       const data = buffer.getChannelData(channel);
       if (old) data.set(old.getChannelData(channel));
       data.set(chunk.getChannelData(channel), oldLength);
     }
-    // Read the clock after copying. Stop and start at the same context time;
-    // no delayed orphan source can survive a later append, pause, or remove.
     clip.progress = this.playhead(clip);
     this.stop(clip);
     clip.buffer = buffer;
     this.startLive(clip);
   }
-
-  private remove(name: string): void {
+  remove(name) {
     const clip = this.clips.get(name);
     if (!clip) return;
     this.stop(clip);
@@ -366,8 +294,7 @@ export class AudioEngine {
     clip.panner?.disconnect();
     this.clips.delete(name);
   }
-
-  private syncTimeline(force = false): void {
+  syncTimeline(force = false) {
     if (!this.transport) return;
     const state = this.transport();
     positiveRate(state.rate);
@@ -377,12 +304,11 @@ export class AudioEngine {
       const duration = clip.buffer?.duration ?? 0;
       const position = (state.position - clip.startTime) * clip.playbackRate;
       const rate = state.rate * clip.playbackRate;
-      if (!state.playing || !duration || (!clip.loop && position >= duration)) {
+      if (!state.playing || !duration || !clip.loop && position >= duration) {
         this.stop(clip);
         clip.progress = Math.max(0, Math.min(position, duration));
         continue;
       }
-      // The external clock advances while autoplay is blocked; resync on unlock.
       if (this.context().state !== "running") {
         this.requestUnlock();
         continue;
@@ -394,10 +320,9 @@ export class AudioEngine {
       this.start(clip, position, rate);
     }
   }
-
-  private scheduleFrame(): void {
+  scheduleFrame() {
     const wanted = [...this.clips.values()].some(
-      (clip) => clip.positional || (clip.startTime !== null && this.transport),
+      (clip) => clip.positional || clip.startTime !== null && this.transport
     );
     if (wanted && this.frame === null) this.frame = requestAnimationFrame(this.tick);
     if (!wanted && this.frame !== null) {
@@ -405,17 +330,10 @@ export class AudioEngine {
       this.frame = null;
     }
   }
-
-  private tick = (): void => {
-    this.frame = null;
-    this.sync(false);
-  };
-
-  private checkAlive(): void {
+  checkAlive() {
     if (this.disposed) throw new Error("AudioEngine has been disposed.");
   }
-
-  private updateSpatialization(): void {
+  updateSpatialization() {
     const ctx = this.ctx;
     if (!ctx || ![...this.clips.values()].some((clip) => clip.positional)) return;
     const camera = this.host?.cameraMatrix();
@@ -425,46 +343,40 @@ export class AudioEngine {
         translation(camera),
         // A camera looks down its own -Z.
         normalize([-camera[8], -camera[9], -camera[10]]),
-        normalize([camera[4], camera[5], camera[6]]),
+        normalize([camera[4], camera[5], camera[6]])
       );
     }
     for (const clip of this.clips.values()) {
       if (!clip.positional || !clip.panner) continue;
-      // Looked up every frame: the scene node may mount after its clip.
       const matrix = this.host?.nodeMatrix(clip.name);
       if (!matrix) continue;
       setPannerPose(
         clip.panner,
         translation(matrix),
-        normalize([matrix[8], matrix[9], matrix[10]]),
+        normalize([matrix[8], matrix[9], matrix[10]])
       );
     }
   }
-}
-
-function translation(matrix: MatrixElements): Vec3 {
+};
+function translation(matrix) {
   return [matrix[12], matrix[13], matrix[14]];
 }
-
-function sampleFloats(samples: Samples): Float32Array {
+function sampleFloats(samples) {
   if (samples instanceof Float32Array) return samples;
   const bytes = samples instanceof ArrayBuffer ? new Uint8Array(samples) : samples;
   if (bytes.byteLength % 4) throw new Error("Audio samples must contain complete float32 values.");
   const aligned = bytes.byteOffset % 4 === 0 ? bytes : bytes.slice();
   return new Float32Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 4);
 }
-
-function positiveRate(rate: number): void {
+function positiveRate(rate) {
   if (!Number.isFinite(rate) || rate <= 0)
     throw new Error("Playback rate must be finite and positive.");
 }
-
-function normalize(v: Vec3): Vec3 {
+function normalize(v) {
   const length = Math.hypot(v[0], v[1], v[2]);
   return length > 0 ? [v[0] / length, v[1] / length, v[2] / length] : [0, 0, -1];
 }
-
-function setPannerPose(panner: PannerNode, position: Vec3, forward: Vec3): void {
+function setPannerPose(panner, position, forward) {
   panner.positionX.value = position[0];
   panner.positionY.value = position[1];
   panner.positionZ.value = position[2];
@@ -472,8 +384,7 @@ function setPannerPose(panner: PannerNode, position: Vec3, forward: Vec3): void 
   panner.orientationY.value = forward[1];
   panner.orientationZ.value = forward[2];
 }
-
-function setListenerPose(listener: AudioListener, position: Vec3, forward: Vec3, up: Vec3): void {
+function setListenerPose(listener, position, forward, up) {
   listener.positionX.value = position[0];
   listener.positionY.value = position[1];
   listener.positionZ.value = position[2];
@@ -484,3 +395,6 @@ function setListenerPose(listener: AudioListener, position: Vec3, forward: Vec3,
   listener.upY.value = up[1];
   listener.upZ.value = up[2];
 }
+export {
+  AudioEngine
+};

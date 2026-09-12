@@ -41,7 +41,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
-      - run: git diff --exit-code -- ../runtime.js
+      - run: git diff --exit-code -- ../runtime.js ../engine.js
 
   e2e:
     runs-on: ubuntu-latest

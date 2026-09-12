@@ -1,43 +1,40 @@
-// Bootstrap: dispose any prior instance, install the runtime, and expose a
-// small handle on window.__VISER_AUDIO__. A page can outlive a websocket
-// session, and every (re)connect replays the injected bundle, so each run
-// installs a fresh runtime tied to the current connection.
-
+// The live viser adapter and standalone engine share the same public protocol.
 import { AudioEngine } from "./audio";
-import type { ClipDebugState } from "./audio";
 import { isAudioMessage } from "./protocol";
 import { Viser } from "./viser";
-import type { QueueMessage } from "./viser";
 
 class Runtime {
+  readonly AudioEngine = AudioEngine;
+  readonly engine: AudioEngine;
   private readonly viser: Viser;
-  private readonly engine: AudioEngine;
 
   constructor() {
-    this.viser = new Viser((message) => this.route(message));
+    this.viser = new Viser();
     this.engine = new AudioEngine(this.viser);
-    this.viser.install();
   }
 
-  debug(): ClipDebugState[] {
+  receive(payload: string): void {
+    const message = JSON.parse(payload, (_key, value) => {
+      if (value && typeof value === "object" && "__audio_samples" in value) {
+        const binary = atob(value.__audio_samples);
+        const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+        return new Float32Array(bytes.buffer);
+      }
+      return value;
+    });
+    if (!isAudioMessage(message)) throw new Error(`Unknown audio message: ${message.type}`);
+    this.engine.handle(message);
+  }
+
+  debug() {
     return this.engine.debug();
   }
 
   dispose(): void {
-    this.viser.dispose();
     this.engine.dispose();
-  }
-
-  private route(message: QueueMessage): boolean {
-    // Recordings and embedded scenes replay messages without a server; there
-    // is nothing for us to drive there, so let viser see everything.
-    if (!this.viser.isWebsocket || !isAudioMessage(message)) return false;
-    this.engine.handle(message);
-    return true;
   }
 }
 
-type RuntimeHandle = { dispose(): void; debug(): ClipDebugState[] };
-const win = window as Window & { __VISER_AUDIO__?: RuntimeHandle };
+const win = window as Window & { __VISER_AUDIO__?: Runtime };
 win.__VISER_AUDIO__?.dispose();
 win.__VISER_AUDIO__ = new Runtime();

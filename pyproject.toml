@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "viser-audio"
-version = "0.0.2"
-description = "Audio for viser scenes: positional clips, playback control, and streaming."
+version = "0.1.0"
+description = "Audio for viser scenes and timeline players: positional clips, playback, and streaming."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -32,15 +32,14 @@ dev = [
 ]
 
 [tool.hatch.build]
-# runtime.js is a build artifact of the TypeScript sources, but it is checked
-# in and must ship in the wheel.
+# Browser bundles are checked in and ship in the wheel.
 exclude = [
     "src/viser_audio/client/node_modules",
     "**/__pycache__/**",
 ]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src/viser_audio"]
+only-include = ["src/viser_audio", "examples", "tests", "README.md", "docs"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/viser_audio"]

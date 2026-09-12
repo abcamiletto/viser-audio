@@ -1,170 +1,178 @@
 "use strict";
 (() => {
   // audio.ts
-  var APPEND_SWAP_LEAD_SECONDS = 0.05;
-  var UNLOCK_NOTIFICATION_UUID = "viser-audio-unlock";
-  function normalize(v) {
-    const length = Math.hypot(v[0], v[1], v[2]);
-    return length > 0 ? [v[0] / length, v[1] / length, v[2] / length] : [0, 0, -1];
-  }
-  function setPannerPose(panner, position, forward) {
-    if (panner.positionX) {
-      panner.positionX.value = position[0];
-      panner.positionY.value = position[1];
-      panner.positionZ.value = position[2];
-      panner.orientationX.value = forward[0];
-      panner.orientationY.value = forward[1];
-      panner.orientationZ.value = forward[2];
-    } else {
-      panner.setPosition(position[0], position[1], position[2]);
-      panner.setOrientation(forward[0], forward[1], forward[2]);
-    }
-  }
-  function setListenerPose(listener, position, forward, up) {
-    if (listener.positionX) {
-      listener.positionX.value = position[0];
-      listener.positionY.value = position[1];
-      listener.positionZ.value = position[2];
-      listener.forwardX.value = forward[0];
-      listener.forwardY.value = forward[1];
-      listener.forwardZ.value = forward[2];
-      listener.upX.value = up[0];
-      listener.upY.value = up[1];
-      listener.upZ.value = up[2];
-    } else {
-      listener.setPosition(position[0], position[1], position[2]);
-      listener.setOrientation(
-        forward[0],
-        forward[1],
-        forward[2],
-        up[0],
-        up[1],
-        up[2]
-      );
-    }
-  }
+  var DRIFT_SECONDS = 0.08;
   var AudioEngine = class {
-    constructor(viser) {
-      this.viser = viser;
+    constructor(host) {
+      this.host = host;
       this.ctx = null;
       this.clips = /* @__PURE__ */ new Map();
+      this.transport = null;
       this.frame = null;
-      this.unlockShown = false;
+      this.unlockButton = null;
+      this.resumePending = false;
+      this.disposed = false;
       this.unlock = () => {
         const ctx = this.ctx;
-        if (!ctx || ctx.state === "running") return;
+        if (!ctx || ctx.state === "running" || this.resumePending) return;
+        this.resumePending = true;
         void ctx.resume().then(() => {
-          if (this.unlockShown) {
-            this.unlockShown = false;
-            this.viser.pushToViser({
-              type: "RemoveNotificationMessage",
-              uuid: UNLOCK_NOTIFICATION_UUID
-            });
-          }
+          if (this.disposed) return;
+          this.hideUnlock();
+          this.syncTimeline();
+        }).catch((error) => {
+          if (!this.disposed) console.error("[viser-audio] Audio context could not resume", error);
+        }).finally(() => {
+          this.resumePending = false;
         });
       };
       this.tick = () => {
-        this.frame = requestAnimationFrame(this.tick);
-        this.updateSpatialization();
+        this.frame = null;
+        this.sync(false);
       };
     }
     handle(message) {
-      switch (message.type) {
-        case "AudioAddMessage": {
-          this.removeClip(message.name);
-          const clip = {
-            name: message.name,
-            sampleRate: message.sample_rate,
-            numChannels: message.num_channels,
-            samples: message.samples,
-            volume: message.volume,
-            loop: message.loop,
-            positional: message.positional,
-            buffer: null,
-            source: null,
-            gain: null,
-            panner: null,
-            playing: false,
-            playRequested: false,
-            progress: 0,
-            startedAt: 0
-          };
-          this.clips.set(clip.name, clip);
-          clip.buffer = this.buildBuffer(clip);
-          break;
-        }
-        case "AudioUpdateMessage": {
-          const clip = this.clips.get(message.name);
-          if (!clip) break;
-          const updates = message.updates;
-          if (updates.samples !== void 0) {
-            this.loadSamples(
-              clip,
-              updates.samples,
-              updates.num_channels ?? clip.numChannels
-            );
+      this.checkAlive();
+      if (message.type === "AudioAddMessage") {
+        this.add(message);
+      } else if (message.type === "AudioRemoveMessage") {
+        this.remove(message.name);
+      } else {
+        const clip = this.clips.get(message.name);
+        if (!clip) throw new Error(`Unknown audio clip: ${message.name}`);
+        switch (message.type) {
+          case "AudioSamplesMessage": {
+            const buffer = this.buildBuffer(message.samples, message.num_channels, clip.sampleRate);
+            this.stop(clip);
+            clip.numChannels = message.num_channels;
+            clip.buffer = buffer;
+            clip.progress = 0;
+            this.startLive(clip);
+            break;
           }
-          if (updates.volume !== void 0) {
-            clip.volume = updates.volume;
-            if (clip.gain) clip.gain.gain.value = clip.volume;
+          case "AudioAppendMessage": {
+            this.append(clip, message.samples);
+            break;
           }
-          if (updates.loop !== void 0) {
-            clip.loop = updates.loop;
-            if (clip.source) clip.source.loop = clip.loop;
+          case "AudioUpdateMessage": {
+            const u = message.updates;
+            if (u.volume !== void 0) {
+              clip.volume = u.volume;
+              clip.gain.gain.value = u.volume;
+            }
+            if (u.loop !== void 0) {
+              clip.progress = this.playhead(clip);
+              clip.startedAt = this.context().currentTime;
+              clip.loop = u.loop;
+              if (clip.source) clip.source.loop = u.loop;
+            }
+            if (u.positional !== void 0) {
+              clip.positional = u.positional;
+              this.connectOutput(clip);
+            }
+            if (u.playback_rate !== void 0) {
+              positiveRate(u.playback_rate);
+              clip.progress = this.playhead(clip);
+              this.stop(clip);
+              clip.playbackRate = u.playback_rate;
+              this.startLive(clip);
+            }
+            break;
           }
-          if (updates.positional !== void 0) {
-            clip.positional = updates.positional;
-            if (clip.gain) this.connectOutput(clip);
+          case "AudioPlaybackMessage": {
+            if (clip.startTime !== null)
+              throw new Error("Use the transport to play timeline tracks.");
+            this.stop(clip);
+            clip.progress = message.offset;
+            clip.playRequested = message.playing;
+            this.startLive(clip);
+            break;
           }
-          break;
-        }
-        case "AudioAppendMessage": {
-          const clip = this.clips.get(message.name);
-          if (clip) this.append(clip, message.samples);
-          break;
-        }
-        case "AudioPlaybackMessage": {
-          const clip = this.clips.get(message.name);
-          if (!clip) break;
-          if (message.playing) this.play(clip, message.offset);
-          else this.pause(clip);
-          break;
-        }
-        case "AudioRemoveMessage": {
-          this.removeClip(message.name);
-          break;
         }
       }
-      this.syncPositionalLoop();
+      this.syncTimeline();
+      this.scheduleFrame();
+    }
+    /** Bind a client-local clock. Call sync() after seeks for immediate response. */
+    setTransport(transport) {
+      this.checkAlive();
+      this.transport = transport;
+      for (const clip of this.clips.values()) {
+        if (clip.startTime !== null) this.stop(clip);
+      }
+      this.sync();
+    }
+    /** Restore the tracks folded at a recording checkpoint, then apply its events. */
+    loadCheckpoint(tracks) {
+      this.reset();
+      for (const track of tracks) this.add(track);
+      this.sync();
+    }
+    sync(force = true) {
+      this.checkAlive();
+      this.syncTimeline(force);
+      this.updateSpatialization();
+      this.scheduleFrame();
+    }
+    reset() {
+      this.checkAlive();
+      for (const name of this.clips.keys()) this.remove(name);
+      if (this.frame !== null) cancelAnimationFrame(this.frame);
+      this.frame = null;
     }
     debug() {
-      const contextState = this.ctx === null ? "none" : this.ctx.state;
-      return [...this.clips.values()].map((clip) => {
-        const numFrames = Math.floor(clip.samples.length / clip.numChannels);
-        return {
-          name: clip.name,
-          numChannels: clip.numChannels,
-          sampleRate: clip.sampleRate,
-          numFrames,
-          duration: numFrames / clip.sampleRate,
-          playing: clip.playing,
-          position: this.playhead(clip),
-          volume: clip.volume,
-          loop: clip.loop,
-          positional: clip.positional,
-          contextState
-        };
-      });
+      return [...this.clips.values()].map((clip) => ({
+        name: clip.name,
+        numChannels: clip.numChannels,
+        sampleRate: clip.sampleRate,
+        numFrames: clip.buffer?.length ?? 0,
+        duration: clip.buffer?.duration ?? 0,
+        playing: clip.source !== null,
+        position: Math.max(0, this.playhead(clip)),
+        volume: clip.volume,
+        loop: clip.loop,
+        positional: clip.positional,
+        playbackRate: clip.playbackRate,
+        startTime: clip.startTime,
+        contextState: this.ctx?.state ?? "none"
+      }));
     }
     dispose() {
-      for (const name of [...this.clips.keys()]) this.removeClip(name);
-      this.syncPositionalLoop();
+      if (this.disposed) return;
+      this.reset();
+      this.disposed = true;
       document.removeEventListener("pointerdown", this.unlock);
       document.removeEventListener("keydown", this.unlock);
+      this.hideUnlock();
       void this.ctx?.close();
       this.ctx = null;
     }
-    // --- Context ---------------------------------------------------------
+    add(message) {
+      positiveRate(message.playback_rate);
+      const buffer = this.buildBuffer(message.samples, message.num_channels, message.sample_rate);
+      this.remove(message.name);
+      const clip = {
+        name: message.name,
+        sampleRate: message.sample_rate,
+        numChannels: message.num_channels,
+        volume: message.volume,
+        loop: message.loop,
+        positional: message.positional,
+        playbackRate: message.playback_rate,
+        startTime: message.start_time,
+        buffer,
+        source: null,
+        gain: this.context().createGain(),
+        panner: null,
+        playRequested: false,
+        progress: 0,
+        startedAt: 0,
+        sourceRate: message.playback_rate
+      };
+      clip.gain.gain.value = clip.volume;
+      this.clips.set(clip.name, clip);
+      this.connectOutput(clip);
+    }
     context() {
       if (!this.ctx) {
         this.ctx = new AudioContext();
@@ -174,177 +182,163 @@
       return this.ctx;
     }
     requestUnlock() {
-      if (!this.unlockShown) {
-        this.unlockShown = true;
-        this.viser.pushToViser({
-          type: "NotificationShowMessage",
-          uuid: UNLOCK_NOTIFICATION_UUID,
-          props: {
-            title: "Audio is waiting",
-            body: "Click or press a key to enable audio.",
-            loading: false,
-            with_close_button: true,
-            auto_close_seconds: null,
-            color: null
-          }
-        });
+      if (!this.unlockButton) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "Enable audio";
+        button.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:10000;padding:8px 16px;cursor:pointer";
+        button.addEventListener("click", this.unlock);
+        document.body.append(button);
+        this.unlockButton = button;
       }
       this.unlock();
     }
-    // --- Clip plumbing ---------------------------------------------------
-    buildBuffer(clip) {
-      const frames = Math.floor(clip.samples.length / clip.numChannels);
-      if (frames === 0) return null;
-      const ctx = this.context();
-      const buffer = ctx.createBuffer(clip.numChannels, frames, clip.sampleRate);
-      if (clip.numChannels === 1) {
-        buffer.getChannelData(0).set(clip.samples.subarray(0, frames));
-        return buffer;
+    hideUnlock() {
+      this.unlockButton?.remove();
+      this.unlockButton = null;
+    }
+    buildBuffer(samples, channels, rate) {
+      const flat = sampleFloats(samples);
+      if (!Number.isInteger(channels) || channels < 1 || channels > 32 || flat.length % channels) {
+        throw new Error("Invalid interleaved audio channel count or sample length.");
       }
-      for (let channel = 0; channel < clip.numChannels; channel++) {
+      const frames = flat.length / channels;
+      if (!frames) return null;
+      const buffer = this.context().createBuffer(channels, frames, rate);
+      for (let channel = 0; channel < channels; channel++) {
         const data = buffer.getChannelData(channel);
-        for (let frame = 0; frame < frames; frame++) {
-          data[frame] = clip.samples[frame * clip.numChannels + channel];
-        }
+        for (let frame = 0; frame < frames; frame++) data[frame] = flat[frame * channels + channel];
       }
       return buffer;
     }
     connectOutput(clip) {
       const ctx = this.context();
-      if (!clip.gain) {
-        clip.gain = ctx.createGain();
-        clip.gain.gain.value = clip.volume;
-      }
       clip.gain.disconnect();
-      if (!clip.positional) {
-        clip.panner?.disconnect();
+      clip.panner?.disconnect();
+      if (clip.positional) {
+        if (!this.host) throw new Error("Positional audio requires an AudioHost.");
+        clip.panner ?? (clip.panner = new PannerNode(ctx, { panningModel: "HRTF", distanceModel: "inverse" }));
+        clip.gain.connect(clip.panner);
+        clip.panner.connect(ctx.destination);
+      } else {
         clip.gain.connect(ctx.destination);
-        return;
       }
-      if (!clip.panner) {
-        clip.panner = ctx.createPanner();
-        clip.panner.panningModel = "HRTF";
-        clip.panner.distanceModel = "inverse";
-        clip.panner.refDistance = 1;
-      }
-      clip.gain.connect(clip.panner);
-      clip.panner.disconnect();
-      clip.panner.connect(ctx.destination);
     }
     playhead(clip) {
-      if (!clip.playing || !this.ctx) return clip.progress;
-      return clip.progress + Math.max(this.ctx.currentTime - clip.startedAt, 0);
+      if (!clip.source) return clip.progress;
+      let position = clip.progress;
+      position += (this.context().currentTime - clip.startedAt) * clip.sourceRate;
+      const duration = clip.buffer?.duration ?? 0;
+      if (clip.loop && duration && position >= 0) return position % duration;
+      return Math.min(position, duration);
     }
-    startSource(clip, delay = 0) {
+    start(clip, position, rate) {
       const buffer = clip.buffer;
-      if (!buffer) return;
+      if (!buffer || !clip.loop && position >= buffer.duration) return;
       const ctx = this.context();
-      this.connectOutput(clip);
+      if (ctx.state !== "running") this.requestUnlock();
+      const offset = clip.loop && position >= 0 ? position % buffer.duration : Math.max(0, position);
+      const when = ctx.currentTime + Math.max(0, -position / rate);
       const source = ctx.createBufferSource();
       source.buffer = buffer;
       source.loop = clip.loop;
+      source.playbackRate.value = rate;
       source.connect(clip.gain);
       source.onended = () => {
-        if (clip.source !== source) return;
         source.disconnect();
+        if (clip.source !== source) return;
         clip.source = null;
-        clip.playing = false;
         clip.progress = buffer.duration;
       };
-      const startAt = ctx.currentTime + delay;
-      source.start(startAt, Math.min(clip.progress, buffer.duration));
+      source.start(when, offset);
       clip.source = source;
-      clip.startedAt = startAt;
-      clip.playing = true;
+      clip.progress = offset;
+      clip.startedAt = when;
+      clip.sourceRate = rate;
     }
-    stopSource(clip) {
-      if (clip.source) {
-        clip.source.onended = null;
-        clip.source.stop();
-        clip.source.disconnect();
-        clip.source = null;
-      }
-      clip.playing = false;
-    }
-    startIfRequested(clip) {
-      if (!clip.playRequested || clip.playing || !clip.buffer) return;
-      if (this.context().state !== "running") this.requestUnlock();
-      this.startSource(clip);
-    }
-    // --- Operations ------------------------------------------------------
-    play(clip, offset) {
-      clip.playRequested = true;
-      const buffer = clip.buffer;
-      if (!buffer) return;
-      if (offset !== null) {
-        this.stopSource(clip);
-        clip.progress = Math.min(Math.max(offset, 0), buffer.duration);
-      } else if (!clip.playing && clip.progress >= buffer.duration) {
-        clip.progress = 0;
-      }
-      this.startIfRequested(clip);
-    }
-    pause(clip) {
-      clip.playRequested = false;
-      if (!clip.playing) return;
-      const position = this.playhead(clip);
-      const duration = clip.buffer?.duration ?? 0;
-      clip.progress = clip.loop && duration > 0 ? position % duration : position;
-      this.stopSource(clip);
-    }
-    loadSamples(clip, samples, numChannels) {
-      this.stopSource(clip);
-      clip.samples = samples;
-      clip.numChannels = numChannels;
-      clip.buffer = this.buildBuffer(clip);
-      clip.progress = 0;
-      this.startIfRequested(clip);
-    }
-    append(clip, chunk) {
-      if (chunk.length === 0) return;
-      const samples = new Float32Array(clip.samples.length + chunk.length);
-      samples.set(clip.samples);
-      samples.set(chunk, clip.samples.length);
-      clip.samples = samples;
-      const buffer = this.buildBuffer(clip);
-      if (!buffer) return;
-      if (!clip.playing) {
-        clip.buffer = buffer;
-        this.startIfRequested(clip);
-        return;
-      }
-      const previous = clip.source;
-      const position = (this.playhead(clip) + APPEND_SWAP_LEAD_SECONDS) % buffer.duration;
-      previous.onended = () => previous.disconnect();
-      previous.stop(this.context().currentTime + APPEND_SWAP_LEAD_SECONDS);
+    stop(clip) {
+      if (!clip.source) return;
+      clip.source.onended = null;
+      clip.source.stop();
+      clip.source.disconnect();
       clip.source = null;
-      clip.playing = false;
-      clip.buffer = buffer;
-      clip.progress = position;
-      this.startSource(clip, APPEND_SWAP_LEAD_SECONDS);
     }
-    removeClip(name) {
+    startLive(clip) {
+      if (clip.startTime === null && clip.playRequested) {
+        this.start(clip, clip.progress, clip.playbackRate);
+      }
+    }
+    append(clip, samples) {
+      const chunk = this.buildBuffer(samples, clip.numChannels, clip.sampleRate);
+      if (!chunk) return;
+      const old = clip.buffer;
+      const oldLength = old?.length ?? 0;
+      const buffer = this.context().createBuffer(
+        clip.numChannels,
+        oldLength + chunk.length,
+        clip.sampleRate
+      );
+      for (let channel = 0; channel < clip.numChannels; channel++) {
+        const data = buffer.getChannelData(channel);
+        if (old) data.set(old.getChannelData(channel));
+        data.set(chunk.getChannelData(channel), oldLength);
+      }
+      clip.progress = this.playhead(clip);
+      this.stop(clip);
+      clip.buffer = buffer;
+      this.startLive(clip);
+    }
+    remove(name) {
       const clip = this.clips.get(name);
       if (!clip) return;
-      this.stopSource(clip);
-      clip.gain?.disconnect();
+      this.stop(clip);
+      clip.gain.disconnect();
       clip.panner?.disconnect();
       this.clips.delete(name);
     }
-    // --- Spatialization --------------------------------------------------
-    syncPositionalLoop() {
-      const wanted = [...this.clips.values()].some((clip) => clip.positional);
-      if (wanted && this.frame === null) {
-        this.frame = requestAnimationFrame(this.tick);
-      } else if (!wanted && this.frame !== null) {
+    syncTimeline(force = false) {
+      if (!this.transport) return;
+      const state = this.transport();
+      positiveRate(state.rate);
+      if (!Number.isFinite(state.position)) throw new Error("Timeline position must be finite.");
+      for (const clip of this.clips.values()) {
+        if (clip.startTime === null) continue;
+        const duration = clip.buffer?.duration ?? 0;
+        const position = (state.position - clip.startTime) * clip.playbackRate;
+        const rate = state.rate * clip.playbackRate;
+        if (!state.playing || !duration || !clip.loop && position >= duration) {
+          this.stop(clip);
+          clip.progress = Math.max(0, Math.min(position, duration));
+          continue;
+        }
+        if (this.context().state !== "running") {
+          this.requestUnlock();
+          continue;
+        }
+        const desired = clip.loop && position >= 0 ? position % duration : position;
+        const drift = Math.abs(this.playhead(clip) - desired);
+        if (!force && clip.source && clip.sourceRate === rate && drift < DRIFT_SECONDS) continue;
+        this.stop(clip);
+        this.start(clip, position, rate);
+      }
+    }
+    scheduleFrame() {
+      const wanted = [...this.clips.values()].some(
+        (clip) => clip.positional || clip.startTime !== null && this.transport
+      );
+      if (wanted && this.frame === null) this.frame = requestAnimationFrame(this.tick);
+      if (!wanted && this.frame !== null) {
         cancelAnimationFrame(this.frame);
         this.frame = null;
       }
     }
+    checkAlive() {
+      if (this.disposed) throw new Error("AudioEngine has been disposed.");
+    }
     updateSpatialization() {
       const ctx = this.ctx;
-      if (!ctx) return;
-      const camera = this.viser.cameraMatrix();
+      if (!ctx || ![...this.clips.values()].some((clip) => clip.positional)) return;
+      const camera = this.host?.cameraMatrix();
       if (camera) {
         setListenerPose(
           ctx.listener,
@@ -356,7 +350,7 @@
       }
       for (const clip of this.clips.values()) {
         if (!clip.positional || !clip.panner) continue;
-        const matrix = this.viser.nodeMatrix(clip.name);
+        const matrix = this.host?.nodeMatrix(clip.name);
         if (!matrix) continue;
         setPannerPose(
           clip.panner,
@@ -369,36 +363,84 @@
   function translation(matrix) {
     return [matrix[12], matrix[13], matrix[14]];
   }
+  function sampleFloats(samples) {
+    if (samples instanceof Float32Array) return samples;
+    const bytes = samples instanceof ArrayBuffer ? new Uint8Array(samples) : samples;
+    if (bytes.byteLength % 4) throw new Error("Audio samples must contain complete float32 values.");
+    const aligned = bytes.byteOffset % 4 === 0 ? bytes : bytes.slice();
+    return new Float32Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 4);
+  }
+  function positiveRate(rate) {
+    if (!Number.isFinite(rate) || rate <= 0)
+      throw new Error("Playback rate must be finite and positive.");
+  }
+  function normalize(v) {
+    const length = Math.hypot(v[0], v[1], v[2]);
+    return length > 0 ? [v[0] / length, v[1] / length, v[2] / length] : [0, 0, -1];
+  }
+  function setPannerPose(panner, position, forward) {
+    panner.positionX.value = position[0];
+    panner.positionY.value = position[1];
+    panner.positionZ.value = position[2];
+    panner.orientationX.value = forward[0];
+    panner.orientationY.value = forward[1];
+    panner.orientationZ.value = forward[2];
+  }
+  function setListenerPose(listener, position, forward, up) {
+    listener.positionX.value = position[0];
+    listener.positionY.value = position[1];
+    listener.positionZ.value = position[2];
+    listener.forwardX.value = forward[0];
+    listener.forwardY.value = forward[1];
+    listener.forwardZ.value = forward[2];
+    listener.upX.value = up[0];
+    listener.upY.value = up[1];
+    listener.upZ.value = up[2];
+  }
 
   // protocol.ts
+  var MESSAGE_TYPES = /* @__PURE__ */ new Set([
+    "AudioAddMessage",
+    "AudioUpdateMessage",
+    "AudioSamplesMessage",
+    "AudioAppendMessage",
+    "AudioPlaybackMessage",
+    "AudioRemoveMessage"
+  ]);
   function isAudioMessage(message) {
-    return message.type.startsWith("Audio");
+    return MESSAGE_TYPES.has(message.type);
   }
 
   // viser.ts
-  function isRecord(value) {
-    return !!value && typeof value === "object";
-  }
-  function isViewer(value) {
-    return isRecord(value) && isRecord(value.mutable) && "useGuiConfig" in value && "guiActions" in value && "useSceneTree" in value;
-  }
-  function reactRoot() {
+  var Viser = class {
+    constructor() {
+      this.viewer = null;
+    }
+    nodeMatrix(name) {
+      const node = this.getViewer().mutable.current.nodeRefFromName[name];
+      return node ? node.matrixWorld.elements : null;
+    }
+    cameraMatrix() {
+      const camera = this.getViewer().mutable.current.camera;
+      return camera ? camera.matrixWorld.elements : null;
+    }
+    getViewer() {
+      this.viewer ?? (this.viewer = findViewer());
+      if (!this.viewer) throw new Error("[viser-audio] Could not locate the viser viewer.");
+      return this.viewer;
+    }
+  };
+  function findViewer() {
     const root = document.getElementById("root");
     if (!isRecord(root)) return null;
-    const key = Object.keys(root).find(
-      (name) => name.startsWith("__reactContainer$")
-    );
+    const key = Object.keys(root).find((name) => name.startsWith("__reactContainer$"));
     const container = key ? root[key] : null;
-    return isRecord(container) ? container : null;
-  }
-  function findViewer() {
-    const start = reactRoot();
-    if (!start) return null;
+    if (!isRecord(container)) return null;
     const seen = /* @__PURE__ */ new Set();
-    const stack = [start];
+    const stack = [container];
     while (stack.length) {
       const fiber = stack.pop();
-      if (!fiber || seen.has(fiber)) continue;
+      if (seen.has(fiber)) continue;
       seen.add(fiber);
       const value = fiber.memoizedProps?.value;
       if (isViewer(value)) return value;
@@ -407,124 +449,39 @@
     }
     return null;
   }
-  var RETRY_BUDGET_MS = 5e3;
-  var Viser = class {
-    constructor(onMessage) {
-      this.onMessage = onMessage;
-      this.viewer = null;
-      this.queue = null;
-      this.originalPush = null;
-      this.wrappedPush = null;
-      this.disposed = false;
-      this.deadline = 0;
-    }
-    install() {
-      this.deadline = performance.now() + RETRY_BUDGET_MS;
-      this.tryInstall();
-    }
-    dispose() {
-      this.disposed = true;
-      if (this.queue && this.originalPush && this.queue.push === this.wrappedPush) {
-        this.queue.push = this.originalPush;
-      }
-      this.viewer = null;
-      this.queue = null;
-      this.originalPush = null;
-      this.wrappedPush = null;
-    }
-    get messageSource() {
-      return this.viewer?.messageSource;
-    }
-    /** Recordings and embeds replay a scene without a server; audio is inert. */
-    get isWebsocket() {
-      return this.messageSource === "websocket";
-    }
-    /** Push a message into viser, bypassing our own interception. */
-    pushToViser(message) {
-      this.originalPush?.(message);
-    }
-    /** World matrix of a scene node, or null if it hasn't mounted yet. */
-    nodeMatrix(name) {
-      const node = this.viewer?.mutable.current.nodeRefFromName[name];
-      return node ? node.matrixWorld.elements : null;
-    }
-    /** World matrix of the viewer camera. */
-    cameraMatrix() {
-      const camera = this.viewer?.mutable.current.camera;
-      return camera ? camera.matrixWorld.elements : null;
-    }
-    tryInstall() {
-      if (this.disposed || this.originalPush) return;
-      const viewer = findViewer();
-      if (viewer) {
-        this.viewer = viewer;
-        this.wrapQueue(viewer);
-        return;
-      }
-      if (performance.now() >= this.deadline) {
-        console.error(
-          "[viser-audio] Could not locate the viewer in the React fiber tree after 5s of retries; audio is inactive."
-        );
-        return;
-      }
-      requestAnimationFrame(() => this.tryInstall());
-    }
-    wrapQueue(viewer) {
-      const queue = viewer.mutable.current.messageQueue;
-      const original = queue.push.bind(queue);
-      const wrapped = (...messages) => {
-        const forwarded = [];
-        for (const message of messages) {
-          if (!this.onMessage(message)) forwarded.push(message);
-        }
-        return forwarded.length ? original(...forwarded) : queue.length;
-      };
-      queue.push = wrapped;
-      this.queue = queue;
-      this.originalPush = original;
-      this.wrappedPush = wrapped;
-      this.recoverCurrentBatch();
-    }
-    /** viser runs the script that installs us from the middle of a message
-     * batch it has already dequeued, so audio messages that arrived in the SAME
-     * batch -- the whole scene replay, for a client that connects to a server
-     * with existing clips -- are past our seam. viser reports messages it does
-     * not recognize through `console.log`; catch ours there for the rest of
-     * this batch, then put `console.log` back. */
-    recoverCurrentBatch() {
-      const original = console.log;
-      const wrapped = (...args) => {
-        const message = args[1];
-        if (isRecord(message) && typeof message.type === "string" && this.onMessage(message)) {
-          return;
-        }
-        original.apply(console, args);
-      };
-      console.log = wrapped;
-      queueMicrotask(() => {
-        if (console.log === wrapped) console.log = original;
-      });
-    }
-  };
+  function isViewer(value) {
+    if (!isRecord(value) || !isRecord(value.mutable)) return false;
+    const current = value.mutable.current;
+    return isRecord(current) && "nodeRefFromName" in current && "camera" in current;
+  }
+  function isRecord(value) {
+    return value !== null && typeof value === "object";
+  }
 
   // index.ts
   var Runtime = class {
     constructor() {
-      this.viser = new Viser((message) => this.route(message));
+      this.AudioEngine = AudioEngine;
+      this.viser = new Viser();
       this.engine = new AudioEngine(this.viser);
-      this.viser.install();
+    }
+    receive(payload) {
+      const message = JSON.parse(payload, (_key, value) => {
+        if (value && typeof value === "object" && "__audio_samples" in value) {
+          const binary = atob(value.__audio_samples);
+          const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+          return new Float32Array(bytes.buffer);
+        }
+        return value;
+      });
+      if (!isAudioMessage(message)) throw new Error(`Unknown audio message: ${message.type}`);
+      this.engine.handle(message);
     }
     debug() {
       return this.engine.debug();
     }
     dispose() {
-      this.viser.dispose();
       this.engine.dispose();
-    }
-    route(message) {
-      if (!this.viser.isWebsocket || !isAudioMessage(message)) return false;
-      this.engine.handle(message);
-      return true;
     }
   };
   var win = window;

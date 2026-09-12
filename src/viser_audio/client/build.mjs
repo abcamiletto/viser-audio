@@ -17,3 +17,15 @@ await build({
   charset: "ascii",
   logLevel: "info",
 });
+
+// An ES module for players that provide their own clock and message transport.
+await build({
+  entryPoints: [path.join(clientDir, "audio.ts")],
+  outfile: path.join(clientDir, "..", "engine.js"),
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: ["es2020"],
+  charset: "ascii",
+  logLevel: "info",
+});

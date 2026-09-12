@@ -24,7 +24,8 @@ def main() -> None:
     clip.play()
 
     phase = 0.0
-    while True:
+    # append retains the clip for replay; keep this example bounded.
+    for _ in range(300):
         # Track the phase across chunks so the sine wave stays continuous.
         step = 2.0 * np.pi * frequency.value / SAMPLE_RATE
         clip.append(0.3 * np.sin(phase + step * np.arange(CHUNK_FRAMES)))
@@ -32,6 +33,7 @@ def main() -> None:
         # Send slightly faster than real time, so the client always has samples
         # queued up ahead of the playhead.
         time.sleep(0.9 * CHUNK_FRAMES / SAMPLE_RATE)
+    server.sleep_forever()
 
 
 if __name__ == "__main__":

@@ -91,7 +91,8 @@ jobs:
 
           (wheel,) = glob.glob("dist/*.whl")
           names = zipfile.ZipFile(wheel).namelist()
-          assert "viser_audio/runtime.js" in names, f"runtime.js missing from {wheel}"
+          for asset in ("runtime.js", "engine.js"):
+              assert f"viser_audio/{asset}" in names, f"{asset} missing from {wheel}"
           assert not any("node_modules" in n for n in names), "node_modules leaked into the wheel"
           print(f"{wheel} OK: {len(names)} files")
           PY

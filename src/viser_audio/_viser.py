@@ -29,9 +29,27 @@ def audio_entity(phase: str) -> Any:
     return _messages.EntityLifecycle(cast(Any, "audio"), cast(Any, phase), "name")
 
 
-def queue_message(server: viser.ViserServer, message: Message) -> None:
-    """Broadcast a message to every connected (and future) client."""
-    server._websock_server.queue_message(message)
+def queue_message(target: viser.ViserServer, message: Message) -> None:
+    """Send through viser, purging history superseded by sample replacement."""
+    from . import messages
+
+    connection = target._websock_server
+    with connection._record_lock:
+        buffer = connection.get_message_buffer()
+        if isinstance(message, messages.AudioAddMessage):
+            buffer.remove_entity_state_from_buffer("audio", message.name)
+        elif isinstance(message, messages.AudioSamplesMessage):
+            buffer.remove_from_buffer(
+                lambda old: (
+                    isinstance(old, messages.AudioAppendMessage)
+                    and old.name == message.name
+                )
+            )
+        connection.queue_message(message)
+
+
+def is_removed(frame: viser.FrameHandle) -> bool:
+    return frame._impl.removed
 
 
 def install_runtime(server: viser.ViserServer, source: str) -> None:
